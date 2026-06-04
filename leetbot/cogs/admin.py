@@ -88,7 +88,9 @@ class AdminCog(commands.Cog, name="AdminCog"):
         # Also clear any in-memory session so they can /solve again immediately
         sm = getattr(self.bot, "session_manager", None)
         if sm is not None:
-            sm.sessions.pop((str(target.id), day), None)
+            session = sm.get_by_user_day(str(target.id), day)
+            if session is not None:
+                sm.remove(session)
 
         if deleted:
             await interaction.followup.send(

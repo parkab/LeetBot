@@ -75,10 +75,10 @@ Each `/solve` creates a thread off the daily post where only the solving user's 
 | Technique | 25 | −5 | 0 |
 | Code | 60 | −10 | 10 |
 
-Max total: **100 pts**. Use `/giveup` to lock in partial credit and reveal the reference solution.
+Max total: **100 pts**. Use `/giveup` to lock in partial credit and reveal the reference solution for each individual step.
 
 ---
 
 ## Environment Variables
 
-See `.env.example` for the full list. All variables there are **required** — the bot fails loudly on startup if any are missing.
+See `.env.example` for the full list. All variables there are **required**, the bot fails loudly on startup if any are missing.

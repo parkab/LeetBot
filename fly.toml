@@ -1,0 +1,24 @@
+# fly.toml — LeetBot Discord bot
+# Gateway-only process: no HTTP port, must never be auto-stopped.
+
+app = 'leetbot'
+primary_region = 'iad'
+
+[build]
+
+[deploy]
+  strategy = 'immediate'
+
+[[mounts]]
+  source = 'leetbot_data'
+  destination = '/data'
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory = '256mb'
+
+# No [http_service] — the bot connects outbound to Discord's gateway.
+# Fly must not auto-stop this machine or the bot disconnects from Discord.
+[processes]
+  app = "python -m leetbot.main"

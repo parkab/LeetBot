@@ -163,6 +163,24 @@ def build_step_solution_prompt(
     )
 
 
+def build_explain_prompt(
+    question: str,
+    problem_title: str,
+    problem_content: str,
+    reference_solution: str,
+) -> str:
+    return (
+        f"You are a patient and educational coding interview coach.\n"
+        f"A student has a follow-up question about a LeetCode problem and its solution.\n"
+        f"Answer clearly and educationally. Use concrete examples where helpful.\n"
+        f"Match your depth to the question — a line-level question needs 2-3 sentences; "
+        f"a broad 'explain the whole thing' question deserves a thorough walkthrough.\n\n"
+        f"Problem: {problem_title}\n{problem_content[:2000]}\n\n"
+        f"Reference solution:\n```python\n{reference_solution[:1500]}\n```\n\n"
+        f"Student's question: {question}"
+    )
+
+
 REFERENCE_SOLUTION_PROMPT = """\
 Generate an optimal, clean Python solution for the following LeetCode problem.
 Include only the code; you may add brief inline comments explaining key steps.

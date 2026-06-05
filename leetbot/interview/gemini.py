@@ -8,6 +8,7 @@ from typing import Optional
 import leetbot.config as config
 from leetbot.interview.prompts import (
     REFERENCE_SOLUTION_PROMPT,
+    build_explain_prompt,
     build_grade_prompt,
     build_hint_prompt,
     build_step_solution_prompt,
@@ -148,6 +149,26 @@ async def generate_step_solution(
     except Exception as exc:
         logger.error("Step solution generation failed: %s", exc)
         return "Solution explanation unavailable — check the LeetCode editorial."
+
+
+async def explain_solution(
+    question: str,
+    problem_title: str,
+    problem_content: str,
+    reference_solution: str,
+) -> str:
+    """Answer a free-form follow-up question about a problem and its solution. Never raises."""
+    prompt = build_explain_prompt(question, problem_title, problem_content, reference_solution)
+    client = _get_client()
+    try:
+        response = await client.aio.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as exc:
+        logger.error("Explanation generation failed: %s", exc)
+        return "Explanation unavailable right now — try again in a moment."
 
 
 if __name__ == "__main__":

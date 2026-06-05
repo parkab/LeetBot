@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 import leetbot.config as config
 import leetbot.db as db
 from leetbot.interview.gemini import (
+    explain_solution,
     generate_reference_solution,
     generate_step_solution,
     get_hint,
@@ -338,6 +339,42 @@ class DailyCog(commands.Cog, name="DailyCog"):
             target_ch = ch or interaction.channel
             await target_ch.send(embed=_step_embed(session), view=HintView())
             logger.info("User %s skipped %s on %s", session.user_id, skipped_step.value, day_key)
+
+    @app_commands.command(name="explain", description="Ask any question about today's solution.")
+    @app_commands.describe(question="What do you want to understand? e.g. 'how does line 3 work' or 'explain the whole approach'")
+    async def explain(self, interaction: discord.Interaction, question: str) -> None:
+        await interaction.response.defer()
+
+        day_key = today_key()
+        row = await asyncio.to_thread(db.get_problem, day_key)
+        if row is None:
+            await interaction.followup.send(
+                "Today's problem hasn't been posted yet.", ephemeral=True
+            )
+            return
+
+        reference_solution = row["reference_solution"] or ""
+        if not reference_solution or reference_solution in _UNAVAILABLE_REF:
+            await interaction.followup.send(
+                "The reference solution isn't available yet — try again in a moment.", ephemeral=True
+            )
+            return
+
+        content_text = html_to_text(row["content_html"], max_chars=4000)
+        answer = await explain_solution(
+            question=question,
+            problem_title=row["title"],
+            problem_content=content_text,
+            reference_solution=reference_solution,
+        )
+
+        embed = discord.Embed(
+            title="💬 Explanation",
+            description=answer,
+            color=0x7289DA,
+        )
+        embed.set_footer(text=f"Q: {question[:120]}")
+        await interaction.followup.send(embed=embed)
 
     # ── Shared solve flow ─────────────────────────────────────────────────────
 

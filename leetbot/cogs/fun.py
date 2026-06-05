@@ -1,4 +1,5 @@
 import logging
+import random
 
 import discord
 from discord import app_commands
@@ -21,7 +22,9 @@ class FunCog(commands.Cog, name="FunCog"):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
-        if config.DERPSHRINES_USER_ID and message.author.id == config.DERPSHRINES_USER_ID:
+        if message.author.id == config.BOT_OWNER_ID:
+            return
+        if random.randint(1, 100) == 1:
             try:
                 await message.add_reaction("🤓")
             except discord.HTTPException:

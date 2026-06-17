@@ -7,6 +7,7 @@ from typing import Optional
 
 import leetbot.config as config
 from leetbot.interview.prompts import (
+    RATE_PROMPT,
     REFERENCE_SOLUTION_PROMPT,
     build_explain_prompt,
     build_grade_prompt,
@@ -149,6 +150,21 @@ async def generate_step_solution(
     except Exception as exc:
         logger.error("Step solution generation failed: %s", exc)
         return "Solution explanation unavailable — check the LeetCode editorial."
+
+
+async def rate_activity(activity: str) -> str:
+    """Glaze or flame the user's activity in a mommy persona. Never raises."""
+    prompt = RATE_PROMPT.format(activity=activity)
+    client = _get_client()
+    try:
+        response = await client.aio.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as exc:
+        logger.error("Rate generation failed: %s", exc)
+        return "Mommy is too tired to respond right now, sweetie. Try again later. 😤"
 
 
 async def explain_solution(

@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import leetbot.config as config
+from leetbot.interview.gemini import rate_activity
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,15 @@ class FunCog(commands.Cog, name="FunCog"):
     @app_commands.command(name="linear", description="A very important command.")
     async def linear(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("😄")
+
+    @app_commands.command(name="rate", description="Tell mommy what you did today and she'll judge you.")
+    @app_commands.describe(activity="What did you do?")
+    async def rate(self, interaction: discord.Interaction, activity: str) -> None:
+        await interaction.response.defer()
+        response = await rate_activity(activity)
+        embed = discord.Embed(description=response, color=0xFF69B4)
+        embed.set_footer(text=f"📋 \"{activity[:100]}\"")
+        await interaction.followup.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:

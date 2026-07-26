@@ -87,6 +87,31 @@ def build_daily_embed(problem: "DailyProblem", day_key: str) -> discord.Embed:
     return embed
 
 
+def build_practice_embed(
+    title: str,
+    url: str,
+    difficulty: str,
+    content_text: str,
+    list_label: str,
+    list_url: str,
+    is_repeat: bool = False,
+) -> discord.Embed:
+    """Problem embed for a practice session. `content_text` is already plaintext."""
+    color = DIFFICULTY_COLORS.get(difficulty, 0x7289DA)
+    embed = discord.Embed(
+        title=f"🎯 {list_label}",
+        description=f"**[{title}]({url})**\n\n{content_text[:3500]}",
+        color=color,
+    )
+    embed.add_field(name="Difficulty", value=difficulty, inline=True)
+    embed.add_field(name="List", value=f"[{list_label}]({list_url})", inline=True)
+    footer = "🔁 Different Problem to reroll • 💡 Get Hint • /giveup to skip a step"
+    if is_repeat:
+        footer = "♻️ You've finished every problem at this difficulty — here's a repeat • " + footer
+    embed.set_footer(text=footer[:2048])
+    return embed
+
+
 def extract_code_block(text: str) -> str:
     """Return contents of a ```...``` fence, or the raw text if none found."""
     match = re.search(r"```(?:python|py)?\n?(.*?)```", text, re.DOTALL)

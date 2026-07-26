@@ -35,6 +35,7 @@ class AdminCog(commands.Cog, name="AdminCog"):
         await interaction.response.defer(ephemeral=True)
         cog_names = [
             "leetbot.cogs.daily",
+            "leetbot.cogs.practice",
             "leetbot.cogs.leaderboard",
             "leetbot.cogs.fun",
             "leetbot.cogs.admin",
@@ -73,34 +74,48 @@ class AdminCog(commands.Cog, name="AdminCog"):
         name="resetattempt",
         description="Delete a user's attempt for today so they can retry (owner only).",
     )
-    @app_commands.describe(user="The user whose attempt to wipe (defaults to you)")
+    @app_commands.describe(
+        user="The user whose attempt to wipe (defaults to you)",
+        practice="Also wipe their entire /grind75 + /paretoset history",
+    )
     @is_owner()
     async def resetattempt(
         self,
         interaction: discord.Interaction,
         user: Optional[discord.Member] = None,
+        practice: bool = False,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         target = user or interaction.user
         day = today_key()
         deleted = await asyncio.to_thread(db.delete_attempt, str(target.id), day)
 
-        # Also clear any in-memory session so they can /solve again immediately
+        practice_deleted = 0
+        if practice:
+            practice_deleted = await asyncio.to_thread(
+                db.delete_practice_attempts, str(target.id)
+            )
+
+        # Also clear any in-memory sessions so they can start again immediately
         sm = getattr(self.bot, "session_manager", None)
         if sm is not None:
-            session = sm.get_by_user_day(str(target.id), day)
-            if session is not None:
+            for session in sm.sessions_for_user(str(target.id)):
                 sm.remove(session)
 
-        if deleted:
-            await interaction.followup.send(
-                f"Cleared attempt for {target.mention} on `{day}`.", ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"No attempt found for {target.mention} on `{day}`.", ephemeral=True
-            )
-        logger.info("Attempt reset for user %s on %s by %s", target.id, day, interaction.user)
+        parts = [
+            f"Daily attempt on `{day}`: {'cleared' if deleted else 'none found'}."
+        ]
+        if practice:
+            parts.append(f"Practice history: {practice_deleted} row(s) deleted.")
+        parts.append("In-memory sessions cleared.")
+
+        await interaction.followup.send(
+            f"{target.mention} — " + " ".join(parts), ephemeral=True
+        )
+        logger.info(
+            "Attempt reset for user %s on %s by %s (practice=%s)",
+            target.id, day, interaction.user, practice,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

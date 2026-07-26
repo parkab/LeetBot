@@ -70,6 +70,32 @@ class LeaderboardCog(commands.Cog, name="LeaderboardCog"):
 
         await interaction.response.send_message(embed=embed)
 
+    @leaderboard_group.command(
+        name="practice", description="Top 10 by points from /grind75 and /paretoset."
+    )
+    async def leaderboard_practice(self, interaction: discord.Interaction) -> None:
+        rows = await asyncio.to_thread(db.get_practice_leaderboard)
+
+        embed = discord.Embed(title="🎯 Practice Leaderboard", color=0xC9A84C)
+        if not rows:
+            embed.description = (
+                "No practice problems completed yet. Try `/grind75` or `/paretoset`!"
+            )
+        else:
+            lines: list[str] = []
+            for i, row in enumerate(rows):
+                medal = MEDALS[i] if i < 3 else f"**{i + 1}.**"
+                name = _member_name(interaction.guild, row["user_id"])
+                solved = row["problems_solved"]
+                plural = "problem" if solved == 1 else "problems"
+                lines.append(
+                    f"{medal} {name} — **{row['total_points']} pts** ({solved} {plural})"
+                )
+            embed.description = "\n".join(lines)
+        embed.set_footer(text="Personal best per problem — repeats only count if you improve.")
+
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="stats", description="View your or another user's stats.")
     @app_commands.describe(user="User to look up (defaults to you).")
     async def stats(
@@ -77,19 +103,42 @@ class LeaderboardCog(commands.Cog, name="LeaderboardCog"):
     ) -> None:
         target = user or interaction.user
         row = await asyncio.to_thread(db.get_user_stats, str(target.id))
+        practice = await asyncio.to_thread(db.get_practice_stats, str(target.id))
 
         embed = discord.Embed(
             title=f"📊 Stats — {target.display_name}",
             color=0x7289DA,
         )
-        if row and row["days_played"] > 0:
-            embed.add_field(name="Days Played", value=str(row["days_played"]), inline=True)
-            embed.add_field(name="Total Points", value=str(row["total_points"]), inline=True)
-            embed.add_field(
-                name="Average Points", value=f"{row['avg_points']:.1f}", inline=True
-            )
-        else:
+
+        daily_played = row["days_played"] if row else 0
+        practice_solved = practice["problems_solved"] if practice else 0
+
+        if daily_played == 0 and practice_solved == 0:
             embed.description = f"{target.display_name} hasn't completed any problems yet."
+            await interaction.response.send_message(embed=embed)
+            return
+
+        if daily_played > 0:
+            embed.add_field(
+                name="📅 Daily",
+                value=(
+                    f"{row['days_played']} days • **{row['total_points']} pts**\n"
+                    f"avg {row['avg_points']:.1f}"
+                ),
+                inline=True,
+            )
+        if practice_solved > 0:
+            embed.add_field(
+                name="🎯 Practice",
+                value=(
+                    f"{practice['problems_solved']} solved • **{practice['total_points']} pts**\n"
+                    f"avg {practice['avg_points']:.1f}"
+                ),
+                inline=True,
+            )
+
+        combined = (row["total_points"] if row else 0) + (practice["total_points"] if practice else 0)
+        embed.add_field(name="Combined Points", value=str(combined), inline=True)
 
         await interaction.response.send_message(embed=embed)
 

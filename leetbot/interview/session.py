@@ -21,6 +21,23 @@ _NEXT_STATE: dict[State, State] = {
 }
 
 
+class Mode(str, Enum):
+    DAILY = "daily"
+    PRACTICE = "practice"
+
+
+@dataclass
+class PendingPractice:
+    """A practice thread that exists but has no problem yet.
+
+    Created when /grind75 or /paretoset opens the thread, and consumed once the
+    user picks a difficulty.
+    """
+    user_id: str
+    list_name: str
+    channel_id: int
+
+
 @dataclass
 class InterviewSession:
     user_id: str
@@ -29,6 +46,14 @@ class InterviewSession:
     problem_content: str   # plaintext (HTML stripped)
     problem_url: str
     reference_solution: str
+
+    # Practice mode — set when the session came from a curated problem list.
+    mode: Mode = Mode.DAILY
+    list_name: Optional[str] = None        # "grind75" | "pareto"
+    problem_slug: Optional[str] = None
+    problem_difficulty: Optional[str] = None
+    difficulty_filter: Optional[str] = None  # what the user picked; None = "any"
+    is_repeat: bool = False                  # every problem at this difficulty is done
 
     channel_id: Optional[int] = None
     state: State = field(default=State.BRUTE_FORCE)
@@ -52,6 +77,30 @@ class InterviewSession:
     bf_answers: list[str] = field(default_factory=list)
     tech_answers: list[str] = field(default_factory=list)
     code_answers: list[str] = field(default_factory=list)
+
+    # ── Identity ──────────────────────────────────────────────────────────────
+
+    @property
+    def session_key(self) -> str:
+        """Unique per-user key. Daily sessions key by day, practice by problem,
+        so a user can have a daily thread and a practice thread open at once."""
+        if self.mode == Mode.PRACTICE:
+            return f"practice:{self.problem_slug}"
+        return self.day_key
+
+    @property
+    def is_practice(self) -> bool:
+        return self.mode == Mode.PRACTICE
+
+    def reset_progress(self) -> None:
+        """Wipe all step progress — used when a practice user rerolls the problem."""
+        self.state = State.BRUTE_FORCE
+        self.bf_retries = self.tech_retries = self.code_retries = 0
+        self.bf_hints = self.tech_hints = self.code_hints = 0
+        self.bf_skipped = self.tech_skipped = self.code_skipped = False
+        self.bf_answers.clear()
+        self.tech_answers.clear()
+        self.code_answers.clear()
 
     # ── Answer recording ──────────────────────────────────────────────────────
 

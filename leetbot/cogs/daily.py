@@ -11,25 +11,23 @@ from discord.ext import commands, tasks
 
 import leetbot.config as config
 import leetbot.db as db
-from leetbot.interview.gemini import (
-    explain_solution,
-    generate_reference_solution,
-    generate_step_solution,
-    get_hint,
-    grade_answer,
+from leetbot.interview.flow import (
+    HintView,
+    handle_answer,
+    handle_giveup,
+    is_usable_reference,
+    step_embed,
 )
-from leetbot.interview.prompts import get_first_prompt
-from leetbot.interview.session import InterviewSession, State
+from leetbot.interview.gemini import explain_solution, generate_reference_solution
+from leetbot.interview.session import InterviewSession, Mode, State
 from leetbot.leetcode import fetch_daily
-from leetbot.utils.format import build_daily_embed, extract_code_block, html_to_text
+from leetbot.utils.format import build_daily_embed, html_to_text
 from leetbot.utils.time import today_key
 
 if TYPE_CHECKING:
     from leetbot.bot import LeetBot
 
 logger = logging.getLogger(__name__)
-
-_UNAVAILABLE_REF = {"# Reference solution unavailable", "# Not available", ""}
 
 
 # ── Persistent views ──────────────────────────────────────────────────────────
@@ -53,95 +51,6 @@ class DailyView(discord.ui.View):
             )
             return
         await cog._start_solve_flow(interaction, private=False)
-
-
-class HintView(discord.ui.View):
-    """Attached to every step embed — lets the user request a hint for that step."""
-
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="💡 Get Hint",
-        style=discord.ButtonStyle.secondary,
-        custom_id="persistent:get_hint",
-    )
-    async def get_hint_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        session = interaction.client.session_manager.get_by_channel(interaction.channel.id)  # type: ignore[attr-defined]
-
-        if session is None:
-            await interaction.response.send_message(
-                "No active session in this channel.", ephemeral=True
-            )
-            return
-        if interaction.user.id != int(session.user_id):
-            await interaction.response.send_message(
-                "This isn't your interview session.", ephemeral=True
-            )
-            return
-        if session.state == State.DONE:
-            await interaction.response.send_message(
-                "Your session is already complete!", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer()
-
-        hint_number = session.increment_hint()
-        previous_answers = session.answers_for_current_step()
-
-        hint_text = await get_hint(
-            step=session.state.value,
-            hint_number=hint_number,
-            problem_title=session.problem_title,
-            problem_content=session.problem_content,
-            previous_answers=previous_answers,
-        )
-
-        embed = discord.Embed(
-            title=f"💡 Hint #{hint_number}",
-            description=hint_text,
-            color=0xF0A500,
-        )
-        if hint_number >= 3:
-            embed.set_footer(text="This is a detailed hint — the next level reveals the solution directly.")
-        await interaction.followup.send(embed=embed)
-
-
-# ── Step embed helpers ────────────────────────────────────────────────────────
-
-_STEP_HEADER: dict[State, str] = {
-    State.BRUTE_FORCE: "Step 1 of 3 — Brute Force 🔨",
-    State.TECHNIQUE: "Step 2 of 3 — Optimal Technique 🧠",
-    State.CODE: "Step 3 of 3 — Python Implementation 💻",
-}
-
-_RETRY_PREFIX = "❌ Not quite. "
-
-
-def _step_embed(session: InterviewSession) -> discord.Embed:
-    step = session.state
-    penalty_info = {
-        State.BRUTE_FORCE: f"−{config.BF_PENALTY} pts per retry (floor {config.BF_FLOOR})",
-        State.TECHNIQUE: f"−{config.TECH_PENALTY} pts per retry (floor {config.TECH_FLOOR})",
-        State.CODE: f"−{config.CODE_PENALTY} pts per retry (floor {config.CODE_FLOOR})",
-    }
-    hints_used = session.hints_for_current_step()
-    hint_note = f" • hints used: {hints_used}" if hints_used else ""
-    embed = discord.Embed(
-        title=_STEP_HEADER[step],
-        description=get_first_prompt(step.value),
-        color=0x7289DA,
-    )
-    embed.set_footer(
-        text=(
-            f"{penalty_info[step]} • /giveup to skip this step"
-            f" • current score: {session.compute_score()}{hint_note}"
-        )
-    )
-    return embed
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -257,122 +166,79 @@ class DailyCog(commands.Cog, name="DailyCog"):
 
     @app_commands.command(name="giveup", description="Skip the current step (score 0 for it) and move on.")
     async def giveup(self, interaction: discord.Interaction) -> None:
-        day_key = today_key()
-        session = self.bot.session_manager.get_by_user_day(str(interaction.user.id), day_key)
+        # Route by channel first so this works for daily and practice threads alike.
+        session = self.bot.session_manager.get_by_channel(interaction.channel.id)
 
         if session is None:
+            # Fall back to the user's daily session so /giveup still works from
+            # anywhere, but point them at the thread rather than replying here.
+            daily_session = self.bot.session_manager.get_by_user_day(
+                str(interaction.user.id), today_key()
+            )
+            if daily_session is not None and daily_session.channel_id:
+                ch = self.bot.get_channel(daily_session.channel_id)
+                where = ch.jump_url if isinstance(ch, discord.Thread) else "your DMs"
+                await interaction.response.send_message(
+                    f"Run `/giveup` inside your interview session — {where}.", ephemeral=True
+                )
+                return
             await interaction.response.send_message(
-                "You don't have an active interview session today.", ephemeral=True
+                "You don't have an active interview session here.", ephemeral=True
+            )
+            return
+
+        if interaction.user.id != int(session.user_id):
+            await interaction.response.send_message(
+                "This isn't your interview session.", ephemeral=True
+            )
+            return
+        if session.state == State.DONE:
+            await interaction.response.send_message(
+                "Your session is already complete!", ephemeral=True
             )
             return
 
         await interaction.response.defer()
-
-        skipped_step = session.state
-        is_last_step = skipped_step == State.CODE
-
-        # Generate the solution explanation for the step being skipped
-        if skipped_step == State.CODE:
-            step_solution = session.reference_solution
-            solution_label = "Reference solution"
-        else:
-            step_solution = await generate_step_solution(
-                step=skipped_step.value,
-                problem_title=session.problem_title,
-                problem_content=session.problem_content,
-            )
-            solution_label = "Correct approach"
-
-        step_names = {
-            State.BRUTE_FORCE: "Brute Force",
-            State.TECHNIQUE: "Optimal Technique",
-            State.CODE: "Code",
-        }
-
-        # Advance state (skip = 0 pts for this step)
-        session.skip_current_step()
-
-        if is_last_step or session.state == State.DONE:
-            # Session over
-            score = session.compute_score()
-            breakdown = session.step_breakdown()
-            await asyncio.to_thread(
-                db.record_attempt,
-                session.user_id, session.day_key, score,
-                session.bf_retries, session.tech_retries, session.code_retries,
-            )
-            self.bot.session_manager.remove(session)
-
-            if skipped_step == State.CODE:
-                solution_block = f"```python\n{step_solution[:1500]}\n```"
-            else:
-                solution_block = step_solution
-
-            embed = discord.Embed(
-                title=f"⏭️ Skipped: {step_names[skipped_step]} — Interview Over",
-                color=0xFF375F,
-                description=(
-                    f"**{solution_label}:**\n{solution_block}\n\n"
-                    f"**Final score: {score} / 100 pts**\n"
-                    f"Brute Force: {breakdown['brute_force']} / {config.BF_MAX}\n"
-                    f"Technique:   {breakdown['technique']} / {config.TECH_MAX}\n"
-                    f"Code:        {breakdown['code']} / {config.CODE_MAX}"
-                ),
-            )
-            await interaction.followup.send(embed=embed)
-            logger.info("User %s skipped final step on %s, score %d", session.user_id, day_key, score)
-        else:
-            # Still more steps — show solution for skipped step, then next step prompt
-            solution_block = step_solution
-            skip_embed = discord.Embed(
-                title=f"⏭️ Skipped: {step_names[skipped_step]} (0 pts)",
-                color=0xFFA116,
-                description=f"**{solution_label}:**\n{solution_block}",
-            )
-            skip_embed.set_footer(text="Moving on to the next step — you can still earn points!")
-            await interaction.followup.send(embed=skip_embed)
-
-            ch = self.bot.get_channel(session.channel_id) if session.channel_id else interaction.channel
-            if ch and ch.id != interaction.channel.id:
-                await ch.send(embed=skip_embed)
-
-            target_ch = ch or interaction.channel
-            await target_ch.send(embed=_step_embed(session), view=HintView())
-            logger.info("User %s skipped %s on %s", session.user_id, skipped_step.value, day_key)
+        await handle_giveup(interaction, session, self.bot.session_manager)
 
     @app_commands.command(name="explain", description="Ask any question about today's solution.")
     @app_commands.describe(question="What do you want to understand? e.g. 'how does line 3 work' or 'explain the whole approach'")
     async def explain(self, interaction: discord.Interaction, question: str) -> None:
         await interaction.response.defer()
 
-        day_key = today_key()
-        row = await asyncio.to_thread(db.get_problem, day_key)
-        if row is None:
-            await interaction.followup.send(
-                "Today's problem hasn't been posted yet.", ephemeral=True
-            )
-            return
+        # Inside an interview thread, explain that problem instead of today's.
+        session = self.bot.session_manager.get_by_channel(interaction.channel.id)
+        if session is not None:
+            from leetbot.interview.flow import ensure_reference_solution
+            title = session.problem_title
+            content_text = session.problem_content
+            reference_solution = await ensure_reference_solution(session)
+        else:
+            day_key = today_key()
+            row = await asyncio.to_thread(db.get_problem, day_key)
+            if row is None:
+                await interaction.followup.send(
+                    "Today's problem hasn't been posted yet.", ephemeral=True
+                )
+                return
+            title = row["title"]
+            content_text = html_to_text(row["content_html"], max_chars=4000)
+            reference_solution = row["reference_solution"] or ""
 
-        reference_solution = row["reference_solution"] or ""
-        if not reference_solution or reference_solution in _UNAVAILABLE_REF:
+        if not is_usable_reference(reference_solution):
             await interaction.followup.send(
                 "The reference solution isn't available yet — try again in a moment.", ephemeral=True
             )
             return
 
-        content_text = html_to_text(row["content_html"], max_chars=4000)
         answer = await explain_solution(
             question=question,
-            problem_title=row["title"],
+            problem_title=title,
             problem_content=content_text,
             reference_solution=reference_solution,
         )
 
-        embed = discord.Embed(
-            title="💬 Explanation",
-            description=answer,
-            color=0x7289DA,
-        )
+        embed = discord.Embed(title="💬 Explanation", description=answer, color=0x7289DA)
         embed.set_footer(text=f"Q: {question[:120]}")
         await interaction.followup.send(embed=embed)
 
@@ -418,10 +284,10 @@ class DailyCog(commands.Cog, name="DailyCog"):
 
         # Lazily regenerate reference solution if it was missing or failed previously
         reference_solution = row["reference_solution"] or ""
-        if not reference_solution or reference_solution in _UNAVAILABLE_REF:
+        if not is_usable_reference(reference_solution):
             logger.info("Reference solution missing for %s — regenerating", day_key)
             reference_solution = await generate_reference_solution(row["title"], content_text)
-            if reference_solution and reference_solution not in _UNAVAILABLE_REF:
+            if is_usable_reference(reference_solution):
                 await asyncio.to_thread(db.set_reference_solution, day_key, reference_solution)
 
         session = InterviewSession(
@@ -431,19 +297,19 @@ class DailyCog(commands.Cog, name="DailyCog"):
             problem_content=content_text,
             problem_url=row["url"],
             reference_solution=reference_solution,
+            mode=Mode.DAILY,
+            problem_slug=row["slug"],
+            problem_difficulty=row["difficulty"],
         )
         self.bot.session_manager.add(session)
 
         if private:
-            await self._start_dm_session(interaction, session, row)
+            await self._start_dm_session(interaction, session)
         else:
-            await self._start_thread_session(interaction, session, row)
+            await self._start_thread_session(interaction, session)
 
     async def _start_thread_session(
-        self,
-        interaction: discord.Interaction,
-        session: InterviewSession,
-        row: db.sqlite3.Row,
+        self, interaction: discord.Interaction, session: InterviewSession
     ) -> None:
         daily_channel = self.bot.get_channel(config.DAILY_CHANNEL_ID)
         if daily_channel is None:
@@ -469,15 +335,12 @@ class DailyCog(commands.Cog, name="DailyCog"):
             f"👋 Hey {interaction.user.mention}! Let's tackle **[{session.problem_title}]({session.problem_url})**.\n"
             f"Type your answers here. Use 💡 **Get Hint** for a nudge, or `/giveup` to skip a step.\n​"
         )
-        await thread.send(embed=_step_embed(session), view=HintView())
+        await thread.send(embed=step_embed(session), view=HintView())
         await interaction.followup.send(f"Your interview thread: {thread.jump_url}", ephemeral=True)
         logger.info("Started interview for user %s on %s (thread %s)", session.user_id, session.day_key, thread.id)
 
     async def _start_dm_session(
-        self,
-        interaction: discord.Interaction,
-        session: InterviewSession,
-        row: db.sqlite3.Row,
+        self, interaction: discord.Interaction, session: InterviewSession
     ) -> None:
         try:
             dm = await interaction.user.create_dm()
@@ -491,7 +354,7 @@ class DailyCog(commands.Cog, name="DailyCog"):
             f"👋 Let's tackle **[{session.problem_title}]({session.problem_url})**.\n"
             f"Type your answers here. Use 💡 **Get Hint** for a nudge, or `/giveup` to skip a step.\n​"
         )
-        await dm.send(embed=_step_embed(session), view=HintView())
+        await dm.send(embed=step_embed(session), view=HintView())
         await interaction.followup.send("Check your DMs!", ephemeral=True)
         logger.info("Started private interview for user %s on %s", session.user_id, session.day_key)
 
@@ -499,6 +362,7 @@ class DailyCog(commands.Cog, name="DailyCog"):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        """Routes answers for BOTH daily and practice sessions — they're keyed by channel."""
         if message.author.bot:
             return
 
@@ -512,88 +376,7 @@ class DailyCog(commands.Cog, name="DailyCog"):
         if session.state == State.DONE:
             return
 
-        await self._handle_answer(message, session)
-
-    async def _handle_answer(
-        self, message: discord.Message, session: InterviewSession
-    ) -> None:
-        step = session.state.value
-        answer = extract_code_block(message.content)
-        session.record_answer(answer)
-
-        async with message.channel.typing():
-            verdict = await grade_answer(
-                step=step,
-                problem_title=session.problem_title,
-                problem_content=session.problem_content,
-                user_answer=answer,
-                reference_solution=session.reference_solution if step == "code" else None,
-            )
-
-        if verdict.verdict == "rate_limited":
-            await message.channel.send(embed=discord.Embed(
-                description=verdict.feedback, color=0xFFA116,
-            ))
-            return
-
-        if verdict.accepted:
-            session.accept()
-            feedback_embed = discord.Embed(
-                title="✅ Correct!",
-                description=verdict.feedback,
-                color=0x00B8A9,
-            )
-            if verdict.complexity_check:
-                feedback_embed.add_field(name="Complexity", value=verdict.complexity_check, inline=False)
-            await message.channel.send(embed=feedback_embed)
-
-            if session.state == State.DONE:
-                await self._finish_session(message.channel, session)
-            else:
-                await message.channel.send(embed=_step_embed(session), view=HintView())
-        else:
-            session.reject()
-            retries = session.retries_for_current_step()
-            feedback_embed = discord.Embed(
-                title="❌ Not quite",
-                description=verdict.feedback,
-                color=0xFFA116,
-            )
-            if verdict.complexity_check:
-                feedback_embed.add_field(name="Complexity", value=verdict.complexity_check, inline=False)
-            feedback_embed.set_footer(
-                text=f"Retry #{retries} • current score: {session.compute_score()} pts • use 💡 for a hint"
-            )
-            await message.channel.send(embed=feedback_embed)
-            await message.channel.send(embed=_step_embed(session), view=HintView())
-
-    async def _finish_session(
-        self, channel: discord.abc.Messageable, session: InterviewSession
-    ) -> None:
-        score = session.compute_score()
-        breakdown = session.step_breakdown()
-
-        await asyncio.to_thread(
-            db.record_attempt,
-            session.user_id, session.day_key, score,
-            session.bf_retries, session.tech_retries, session.code_retries,
-        )
-        self.bot.session_manager.remove(session)
-
-        embed = discord.Embed(
-            title="🎉 Interview Complete!",
-            color=0x00B8A9,
-            description=(
-                f"**Total: {score} / 100 pts**\n\n"
-                f"Brute Force: {breakdown['brute_force']} / {config.BF_MAX}\n"
-                f"Technique:   {breakdown['technique']} / {config.TECH_MAX}\n"
-                f"Code:        {breakdown['code']} / {config.CODE_MAX}\n\n"
-                f"**Reference solution:**\n```python\n{session.reference_solution[:1500]}\n```"
-            ),
-        )
-        embed.set_footer(text="Use /leaderboard daily to see where you stand!")
-        await channel.send(embed=embed)
-        logger.info("User %s completed %s with %d pts", session.user_id, session.day_key, score)
+        await handle_answer(message, session, self.bot.session_manager)
 
 
 async def setup(bot: commands.Bot) -> None:

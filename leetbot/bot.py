@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 _COGS = [
     "leetbot.cogs.daily",
+    "leetbot.cogs.practice",
     "leetbot.cogs.leaderboard",
     "leetbot.cogs.fun",
     "leetbot.cogs.admin",
@@ -31,9 +32,13 @@ class LeetBot(commands.Bot):
             logger.info("Loaded cog: %s", cog)
 
         # Register persistent views so button callbacks survive restarts
-        from leetbot.cogs.daily import DailyView, HintView
+        from leetbot.cogs.daily import DailyView
+        from leetbot.cogs.practice import DifficultyView, ProblemView
+        from leetbot.interview.flow import HintView
         self.add_view(DailyView())
         self.add_view(HintView())
+        self.add_view(DifficultyView())
+        self.add_view(ProblemView())
 
         # Sync slash commands guild-scoped (instant, no 1-hour global propagation)
         guild = discord.Object(id=config.DISCORD_GUILD_ID)

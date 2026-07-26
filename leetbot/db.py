@@ -47,6 +47,39 @@ def init_schema() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_attempts_day  ON attempts(day_key);
             CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id);
+
+            -- Practice problems pulled from curated lists (grind75 / pareto).
+            -- Keyed by slug and shared across users, so statements and reference
+            -- solutions are fetched/generated at most once each.
+            CREATE TABLE IF NOT EXISTS practice_problems (
+                slug               TEXT PRIMARY KEY,
+                title              TEXT NOT NULL,
+                difficulty         TEXT NOT NULL,
+                url                TEXT NOT NULL,
+                content_html       TEXT NOT NULL,
+                reference_solution TEXT,
+                fetched_at         TEXT NOT NULL
+            );
+
+            -- One scored row per user per problem, regardless of which list it
+            -- came from (some problems appear in both).
+            CREATE TABLE IF NOT EXISTS practice_attempts (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       TEXT NOT NULL,
+                list_name     TEXT NOT NULL,
+                slug          TEXT NOT NULL,
+                title         TEXT NOT NULL,
+                difficulty    TEXT NOT NULL,
+                points        INTEGER NOT NULL,
+                bf_retries    INTEGER NOT NULL DEFAULT 0,
+                tech_retries  INTEGER NOT NULL DEFAULT 0,
+                code_retries  INTEGER NOT NULL DEFAULT 0,
+                completed_at  TEXT NOT NULL,
+                UNIQUE(user_id, slug)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_practice_user ON practice_attempts(user_id);
+            CREATE INDEX IF NOT EXISTS idx_practice_list ON practice_attempts(list_name);
         """)
     logger.info("DB schema initialized at %s", config.DB_PATH)
 
@@ -175,6 +208,150 @@ def get_user_stats(user_id: str) -> Optional[sqlite3.Row]:
                 COALESCE(SUM(points), 0)  AS total_points,
                 COALESCE(AVG(points), 0)  AS avg_points
             FROM attempts
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+
+# ── Practice problems ─────────────────────────────────────────────────────────
+
+def get_practice_problem(slug: str) -> Optional[sqlite3.Row]:
+    with _get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM practice_problems WHERE slug = ?", (slug,)
+        ).fetchone()
+
+
+def upsert_practice_problem(
+    slug: str,
+    title: str,
+    difficulty: str,
+    url: str,
+    content_html: str,
+    reference_solution: Optional[str] = None,
+) -> None:
+    """Cache a problem statement. Never clobbers an existing reference solution."""
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO practice_problems
+                (slug, title, difficulty, url, content_html, reference_solution, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slug) DO UPDATE SET
+                title              = excluded.title,
+                difficulty         = excluded.difficulty,
+                url                = excluded.url,
+                content_html       = excluded.content_html,
+                reference_solution = COALESCE(practice_problems.reference_solution,
+                                              excluded.reference_solution),
+                fetched_at         = excluded.fetched_at
+            """,
+            (slug, title, difficulty, url, content_html, reference_solution, fetched_at),
+        )
+
+
+def set_practice_reference_solution(slug: str, reference_solution: str) -> None:
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE practice_problems SET reference_solution = ? WHERE slug = ?",
+            (reference_solution, slug),
+        )
+
+
+# ── Practice attempts ─────────────────────────────────────────────────────────
+
+def record_practice_attempt(
+    user_id: str,
+    list_name: str,
+    slug: str,
+    title: str,
+    difficulty: str,
+    points: int,
+    bf_retries: int,
+    tech_retries: int,
+    code_retries: int,
+) -> bool:
+    """Record a practice completion. Returns True if this became the user's best score.
+
+    Re-solving a problem only overwrites the stored row when the new score is
+    strictly higher, so the practice leaderboard reflects personal bests and
+    cannot be farmed down by a lazy repeat.
+    """
+    completed_at = datetime.now(timezone.utc).isoformat()
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO practice_attempts
+                (user_id, list_name, slug, title, difficulty, points,
+                 bf_retries, tech_retries, code_retries, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, slug) DO UPDATE SET
+                list_name    = excluded.list_name,
+                points       = excluded.points,
+                bf_retries   = excluded.bf_retries,
+                tech_retries = excluded.tech_retries,
+                code_retries = excluded.code_retries,
+                completed_at = excluded.completed_at
+            WHERE excluded.points > practice_attempts.points
+            """,
+            (user_id, list_name, slug, title, difficulty, points,
+             bf_retries, tech_retries, code_retries, completed_at),
+        )
+        return cursor.rowcount > 0
+
+
+def get_practice_attempt(user_id: str, slug: str) -> Optional[sqlite3.Row]:
+    with _get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM practice_attempts WHERE user_id = ? AND slug = ?",
+            (user_id, slug),
+        ).fetchone()
+
+
+def get_completed_practice_slugs(user_id: str) -> set[str]:
+    """Slugs the user has already completed — used to avoid serving repeats."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT slug FROM practice_attempts WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    return {row["slug"] for row in rows}
+
+
+def delete_practice_attempts(user_id: str) -> int:
+    """Wipe a user's practice history. Returns the number of rows deleted."""
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM practice_attempts WHERE user_id = ?", (user_id,)
+        )
+        return cursor.rowcount
+
+
+def get_practice_leaderboard() -> list[sqlite3.Row]:
+    with _get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT user_id,
+                   SUM(points) AS total_points,
+                   COUNT(*)    AS problems_solved
+            FROM practice_attempts
+            GROUP BY user_id
+            ORDER BY total_points DESC, problems_solved DESC
+            LIMIT 10
+            """
+        ).fetchall()
+
+
+def get_practice_stats(user_id: str) -> Optional[sqlite3.Row]:
+    with _get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT
+                COUNT(*)                 AS problems_solved,
+                COALESCE(SUM(points), 0) AS total_points,
+                COALESCE(AVG(points), 0) AS avg_points
+            FROM practice_attempts
             WHERE user_id = ?
             """,
             (user_id,),

@@ -1,6 +1,8 @@
 # LeetBot
 
-A Discord bot that posts the LeetCode Daily Challenge every morning and walks users through a three-step mock interview (brute force → optimal technique → code) graded by Gemini AI. Scores are tracked on daily, all-time, and practice leaderboards.
+A Discord bot that serves the LeetCode Daily Challenge on demand and walks users through a three-step mock interview (brute force → optimal technique → code) graded by Gemini AI. Scores are tracked on daily, all-time, and practice leaderboards.
+
+Nothing is scheduled and nothing is posted automatically — run `/daily` to pull today's problem, or just `/solve` to jump straight into an interview on it.
 
 Beyond the daily problem, `/grind75` and `/paretoset` pull random problems from curated LeetCode lists so you can drill on demand.
 
@@ -55,7 +57,7 @@ fly deploy
 
 | Command | Description |
 |---------|-------------|
-| `/daily` | Repost today's problem embed. |
+| `/daily` | Fetch and post today's problem. |
 | `/solve [private:bool]` | Start a mock interview on today's problem. |
 | `/grind75` | Practice a random problem from the Grind 75 list. |
 | `/paretoset` | Practice a random problem from the Pareto set. |
@@ -67,7 +69,7 @@ fly deploy
 | `/stats [user]` | Daily and practice points side by side. |
 | `/linear` | Very important command. |
 | `/rate <activity>` | Mommy judges what you did today. |
-| `/forcedaily` *(owner)* | Force-post today's problem immediately. |
+| `/forcedaily` *(owner)* | Re-fetch today's problem from LeetCode and repost it. |
 | `/reload` *(owner)* | Reload all cogs without restarting the bot. |
 | `/resetattempt [user] [practice]` *(owner)* | Wipe someone's attempt so they can retry. |
 
@@ -75,7 +77,7 @@ fly deploy
 
 ## Interview Flow
 
-Each `/solve` creates a thread off the daily post where only the solving user's messages are routed for grading.
+Each `/solve` creates its own thread in the daily channel, where only the solving user's messages are routed for grading. You don't need to run `/daily` first — `/solve` fetches the problem itself if nobody has yet today.
 
 | Step | Max Points | Retry Penalty | Floor |
 |------|----------:|--------------|-------|

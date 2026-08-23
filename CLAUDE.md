@@ -3,7 +3,7 @@
 ## Project Overview
 
 A Discord bot for a small friend-group server (~20 people) that:
-1. Posts the **LeetCode Daily Challenge** every morning at 9am ET.
+1. Posts the **LeetCode Daily Challenge** on demand when someone runs `/daily`.
 2. Walks each user through an **interview-style solving flow** powered by the Gemini API — brute force explanation → optimal technique → code — with retries, hints, partial credit, and a 100-point max per problem.
 3. Serves **on-demand practice problems** from curated LeetCode lists via `/grind75` and `/paretoset`.
 4. Tracks scores via a **daily leaderboard**, an **all-time leaderboard**, and a separate **practice leaderboard**.
@@ -28,7 +28,7 @@ Hosted on **Fly.io** — single shared-CPU-1x, 256 MB VM, 1 GB persistent volume
 | LeetCode source  | LeetCode GraphQL — `activeDailyCodingChallengeQuestion`, `question`, `favoriteQuestionList` |
 | LLM              | Gemini API (`google-genai` SDK, `=gemini-3.1-flash-lite`) |
 | Storage          | SQLite on Fly persistent volume           |
-| Scheduling       | `discord.ext.tasks` in-process loop       |
+| Scheduling       | None — everything is command-triggered    |
 | Hosting          | Fly.io                                    |
 
 **Gemini model note:** `gemini-2.0-flash` has quota 0 on this account. `gemini-1.5-flash` is not available on v1beta for this account. `gemini-3.1-flash-lite` works and is the current default. The system prompt is embedded directly in the content string (not via `system_instruction`) for v1beta compatibility.
@@ -64,10 +64,10 @@ LeetBot/
     │   ├── gemini.py            # Gemini client, grading, hints, step solutions, ref solution
     │   └── prompts.py           # all prompt templates — single source of truth
     ├── cogs/
-    │   ├── daily.py             # daily loop, /solve, /daily, /giveup, /explain, on_message, DailyView
+    │   ├── daily.py             # /daily, /solve, /giveup, /explain, on_message, DailyView
     │   ├── practice.py          # /grind75, /paretoset, DifficultyView, ProblemView
     │   ├── leaderboard.py       # /leaderboard daily|alltime|practice, /stats
-    │   ├── fun.py               # /linear, /rate, derpshrines auto-react
+    │   ├── fun.py               # /linear, /rate
     │   └── admin.py             # /reload, /forcedaily, /resetattempt (owner-only)
     └── utils/
         ├── time.py              # today_key() — YYYY-MM-DD in configured TIMEZONE
@@ -92,13 +92,11 @@ both would fire on the same message.
 ```
 DISCORD_TOKEN=
 DISCORD_GUILD_ID=           # guild-scoped slash command registration (instant updates)
-DAILY_CHANNEL_ID=           # channel where daily problem is posted
+DAILY_CHANNEL_ID=           # fallback parent channel for interview threads
 GEMINI_API_KEY=             # get from aistudio.google.com (NOT Google Cloud Console) for free tier
 GEMINI_MODEL=gemini-2.5-flash-lite
 BOT_OWNER_ID=               # Discord user ID — gates admin commands
-DERPSHRINES_USER_ID=        # user ID for the 🤓 auto-react prank
-DAILY_POST_HOUR_UTC=13      # 13:00 UTC = 9am ET
-TIMEZONE=America/New_York
+TIMEZONE=America/New_York   # defines the day boundary for day_key / daily leaderboard
 DB_PATH=leetbot.db          # use /data/leetbot.db on Fly.io
 ```
 
@@ -169,6 +167,24 @@ repeat only overwrites the row when the new score is **strictly higher**. That m
 practice leaderboard a personal-best board and keeps `UNIQUE(user_id, slug)` from
 double-counting problems that appear in both lists (e.g. Two Sum). It returns `True`
 only when the row actually improved.
+
+---
+
+## Daily Problem (on demand)
+
+There is **no scheduler** — no `discord.ext.tasks` loop, no cron. Today's problem is
+fetched from LeetCode the first time anyone needs it that day.
+
+`DailyCog._ensure_problem(day_key, force=False)` is the single entry point: it returns
+the cached `problems` row, and only calls LeetCode when there isn't one. `/daily`,
+`/solve`, and `/explain` all go through it, so any of them works as the first command
+of the day — no one has to "post" the problem before others can solve it.
+
+`_fetch_and_store()` retries 3 times with a short backoff (1s, 2s). That's deliberately
+shorter than the old unattended loop's 5-attempt/15s backoff: a user is now waiting on
+the response, and a fast failure they can retry beats a long silent hang.
+
+`/forcedaily` calls `_ensure_problem(force=True)` to bypass the cache and re-fetch.
 
 ---
 
@@ -249,7 +265,7 @@ Skips the **current** step (awards 0 pts for it):
 
 ### Reference Solution
 
-Generated once per problem by a separate Gemini call when the daily post is created, cached in `problems.reference_solution`. If the stored value is null/empty/"# Reference solution unavailable", it is lazily regenerated when a user starts `/solve`.
+Generated once per problem by a separate Gemini call the first time that day's problem is fetched (via `/daily`, `/solve`, or `/explain`), cached in `problems.reference_solution`. If the stored value is null/empty/"# Reference solution unavailable", it is lazily regenerated when a user starts `/solve`.
 
 **Practice problems do NOT generate one up front** — that would burn a Gemini call on every
 reroll. `flow.ensure_reference_solution()` produces it the first time it's actually needed
@@ -323,7 +339,7 @@ All prompts in `interview/prompts.py`. Key design decisions:
 
 | Command                  | Who    | What |
 |--------------------------|--------|------|
-| `/daily`                 | anyone | Reposts today's embed |
+| `/daily`                 | anyone | Fetches today's challenge from LeetCode if not cached yet, then posts the embed. This is the only way the daily problem reaches the channel. |
 | `/solve [private:bool]`  | anyone | Starts interview thread (or DM). Blocked if already completed today. |
 | `/grind75`               | anyone | Practice thread on a random Grind 75 problem |
 | `/paretoset`             | anyone | Practice thread on a random Pareto set problem |
@@ -335,13 +351,19 @@ All prompts in `interview/prompts.py`. Key design decisions:
 | `/stats [user]`          | anyone | Daily + practice breakdown and combined points |
 | `/linear`                | anyone | Posts 😄 |
 | `/rate <activity>`       | anyone | Mommy judges what you did |
-| `/forcedaily`            | owner  | Manually trigger today's post |
+| `/forcedaily`            | owner  | Re-fetch today's problem from LeetCode (bypassing the cache) and repost it |
 | `/reload`                | owner  | Hot-reload all cogs |
 | `/resetattempt [user] [practice]` | owner | Delete a user's daily attempt + clear in-memory sessions. `practice:True` also wipes their whole practice history. |
 
-### Auto-reactions
+### Message listeners
 
-`on_message` in `cogs/fun.py`: if `message.author.id == DERPSHRINES_USER_ID`, react with 🤓.
+There is exactly **one** `on_message` listener in the whole bot, in `cogs/daily.py`. It
+exists solely to route interview answers: it returns immediately unless the message's
+channel has an active session registered in `SessionManager`. It is **not** optional —
+users submit every answer as a plain message, so removing it breaks the interview flow.
+
+Do NOT add any other `on_message` listener. The bot no longer reacts to, scans, or
+otherwise acts on general chat traffic.
 
 ---
 
@@ -417,6 +439,8 @@ All mocked — no real API keys or network needed.
 ## Code Style additions
 
 - Do NOT add a second `on_message` listener — `daily.py` owns the only one and routes by channel.
+- Do NOT add background schedulers. The bot is fully command-triggered by design; there are no `tasks.loop`s anywhere.
+- Do NOT add reactions, scans, or any other passive response to general chat traffic.
 - Do NOT put interview logic in a cog; it belongs in `interview/flow.py` so both modes share it.
 - Do NOT generate a reference solution eagerly for practice problems — use
   `flow.ensure_reference_solution()` so rerolls stay free.
@@ -424,5 +448,5 @@ All mocked — no real API keys or network needed.
 
 ---
 
-*Last updated: 2026-07-26 (practice mode via /grind75 + /paretoset; stricter complexity
-grading on brute force/technique; logic-only lenient grading on code)*
+*Last updated: 2026-08-23 (removed the automatic daily-post scheduler — `/daily` now
+fetches on demand; removed the 🤓 auto-react listener and all passive message handling)*

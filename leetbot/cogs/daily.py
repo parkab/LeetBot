@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 import leetbot.config as config
 import leetbot.db as db
@@ -20,7 +20,7 @@ from leetbot.interview.flow import (
 )
 from leetbot.interview.gemini import explain_solution, generate_reference_solution
 from leetbot.interview.session import InterviewSession, Mode, State
-from leetbot.leetcode import fetch_daily
+from leetbot.leetcode import DailyProblem, fetch_daily
 from leetbot.utils.format import build_daily_embed, html_to_text
 from leetbot.utils.time import today_key
 
@@ -55,72 +55,46 @@ class DailyView(discord.ui.View):
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
+_FETCH_FAILED_MESSAGE = (
+    "Couldn't reach LeetCode to fetch today's challenge — try again in a moment."
+)
+
+
+def _problem_from_row(row: db.sqlite3.Row) -> DailyProblem:
+    return DailyProblem(
+        title=row["title"], slug=row["slug"], difficulty=row["difficulty"],
+        url=row["url"], content_html=row["content_html"],
+    )
+
+
 class DailyCog(commands.Cog, name="DailyCog"):
     def __init__(self, bot: LeetBot) -> None:
         self.bot = bot
-        self.daily_task.start()
 
-    def cog_unload(self) -> None:
-        self.daily_task.cancel()
+    # ── Problem fetching ──────────────────────────────────────────────────────
 
-    # ── Background loop ───────────────────────────────────────────────────────
+    async def _fetch_and_store(self, day_key: str) -> Optional[db.sqlite3.Row]:
+        """Pull today's challenge from LeetCode, cache it, return the stored row.
 
-    @tasks.loop(minutes=1)
-    async def daily_task(self) -> None:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if now_utc.hour != config.DAILY_POST_HOUR_UTC:
-            return
-
-        day_key = today_key()
-        existing = await asyncio.to_thread(db.get_problem, day_key)
-        if existing is not None:
-            return
-
-        channel = self.bot.get_channel(config.DAILY_CHANNEL_ID)
-        if channel is None:
-            logger.error("Daily channel %s not found", config.DAILY_CHANNEL_ID)
-            return
-
-        await self._post_daily(channel)
-
-    @daily_task.before_loop
-    async def _before_daily(self) -> None:
-        await self.bot.wait_until_ready()
-
-    # ── Core posting logic ────────────────────────────────────────────────────
-
-    async def _post_daily(
-        self,
-        channel: discord.TextChannel,
-        force: bool = False,
-    ) -> Optional[discord.Message]:
-        day_key = today_key()
-
-        if not force:
-            existing = await asyncio.to_thread(db.get_problem, day_key)
-            if existing is not None:
-                return None
-
+        Retries are kept short because this now runs inside a slash command — a
+        user waiting on a response is better served by a quick failure they can
+        retry than by a long silent backoff.
+        """
         problem = None
-        for attempt in range(5):
+        for attempt in range(3):
             try:
                 problem = await fetch_daily()
                 break
             except Exception as exc:
                 wait = 2 ** attempt
-                logger.warning("LeetCode fetch attempt %d failed: %s. Retry in %ds", attempt + 1, exc, wait)
-                if attempt < 4:
+                logger.warning(
+                    "LeetCode fetch attempt %d failed: %s. Retry in %ds", attempt + 1, exc, wait
+                )
+                if attempt < 2:
                     await asyncio.sleep(wait)
 
         if problem is None:
-            logger.error("LeetCode fetch failed after 5 attempts for %s", day_key)
-            try:
-                owner = await self.bot.fetch_user(config.BOT_OWNER_ID)
-                await channel.send(
-                    f"{owner.mention} LeetCode fetch failed for `{day_key}`. Please check."
-                )
-            except Exception:
-                pass
+            logger.error("LeetCode fetch failed after 3 attempts for %s", day_key)
             return None
 
         content_text = html_to_text(problem.content_html, max_chars=4000)
@@ -132,32 +106,51 @@ class DailyCog(commands.Cog, name="DailyCog"):
             day_key, problem.title, problem.slug, problem.difficulty,
             problem.url, problem.content_html, posted_at, reference_solution,
         )
+        logger.info("Fetched daily challenge for %s: %s", day_key, problem.title)
+        return await asyncio.to_thread(db.get_problem, day_key)
 
-        embed = build_daily_embed(problem, day_key)
+    async def _ensure_problem(
+        self, day_key: str, force: bool = False
+    ) -> Optional[db.sqlite3.Row]:
+        """Return today's problem row, fetching it from LeetCode if not cached yet."""
+        if not force:
+            row = await asyncio.to_thread(db.get_problem, day_key)
+            if row is not None:
+                return row
+        return await self._fetch_and_store(day_key)
+
+    async def _post_daily(
+        self,
+        channel: discord.TextChannel,
+        force: bool = False,
+    ) -> Optional[discord.Message]:
+        """Post today's challenge into a channel. Used by /forcedaily."""
+        day_key = today_key()
+        row = await self._ensure_problem(day_key, force=force)
+        if row is None:
+            return None
+
+        embed = build_daily_embed(_problem_from_row(row), day_key)
         msg = await channel.send(embed=embed, view=DailyView())
         await asyncio.to_thread(db.set_problem_message_id, day_key, str(msg.id))
-        logger.info("Posted daily challenge for %s: %s", day_key, problem.title)
+        logger.info("Posted daily challenge for %s to channel %s", day_key, channel.id)
         return msg
 
     # ── Slash commands ────────────────────────────────────────────────────────
 
-    @app_commands.command(name="daily", description="Repost today's LeetCode challenge.")
+    @app_commands.command(name="daily", description="Fetch and post today's LeetCode challenge.")
     async def daily(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+
         day_key = today_key()
-        row = await asyncio.to_thread(db.get_problem, day_key)
+        row = await self._ensure_problem(day_key)
         if row is None:
-            await interaction.response.send_message(
-                f"Today's problem hasn't been posted yet (posts at {config.DAILY_POST_HOUR_UTC}:00 UTC).",
-                ephemeral=True,
-            )
+            await interaction.followup.send(_FETCH_FAILED_MESSAGE, ephemeral=True)
             return
 
-        from leetbot.leetcode import DailyProblem
-        problem = DailyProblem(
-            title=row["title"], slug=row["slug"], difficulty=row["difficulty"],
-            url=row["url"], content_html=row["content_html"],
-        )
-        await interaction.response.send_message(embed=build_daily_embed(problem, day_key), view=DailyView())
+        embed = build_daily_embed(_problem_from_row(row), day_key)
+        msg = await interaction.followup.send(embed=embed, view=DailyView(), wait=True)
+        await asyncio.to_thread(db.set_problem_message_id, day_key, str(msg.id))
 
     @app_commands.command(name="solve", description="Start an interview on today's problem.")
     @app_commands.describe(private="Send the interview to your DMs instead of a public thread.")
@@ -215,11 +208,9 @@ class DailyCog(commands.Cog, name="DailyCog"):
             reference_solution = await ensure_reference_solution(session)
         else:
             day_key = today_key()
-            row = await asyncio.to_thread(db.get_problem, day_key)
+            row = await self._ensure_problem(day_key)
             if row is None:
-                await interaction.followup.send(
-                    "Today's problem hasn't been posted yet.", ephemeral=True
-                )
+                await interaction.followup.send(_FETCH_FAILED_MESSAGE, ephemeral=True)
                 return
             title = row["title"]
             content_text = html_to_text(row["content_html"], max_chars=4000)
@@ -271,13 +262,9 @@ class DailyCog(commands.Cog, name="DailyCog"):
             )
             return
 
-        row = await asyncio.to_thread(db.get_problem, day_key)
+        row = await self._ensure_problem(day_key)
         if row is None:
-            await interaction.followup.send(
-                f"Today's problem hasn't been posted yet (posts at {config.DAILY_POST_HOUR_UTC}:00 UTC). "
-                "Ask an admin to `/forcedaily`.",
-                ephemeral=True,
-            )
+            await interaction.followup.send(_FETCH_FAILED_MESSAGE, ephemeral=True)
             return
 
         content_text = html_to_text(row["content_html"], max_chars=4000)

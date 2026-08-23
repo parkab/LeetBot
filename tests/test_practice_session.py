@@ -1,6 +1,4 @@
 """Session/manager behaviour introduced for practice mode."""
-import pytest
-
 from leetbot.interview.manager import SessionManager
 from leetbot.interview.session import InterviewSession, Mode, PendingPractice, State
 

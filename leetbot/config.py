@@ -22,12 +22,8 @@ GEMINI_API_KEY: str = _require("GEMINI_API_KEY")
 BOT_OWNER_ID: int = int(_require("BOT_OWNER_ID"))
 
 GEMINI_MODEL: str = _optional("GEMINI_MODEL", "gemini-2.5-flash-lite")
-DAILY_POST_HOUR_UTC: int = int(_optional("DAILY_POST_HOUR_UTC", "13"))
 TIMEZONE: str = _optional("TIMEZONE", "America/New_York")
 DB_PATH: str = _optional("DB_PATH", "leetbot.db")  # Fly sets /data/leetbot.db via env
-
-_derp = os.environ.get("DERPSHRINES_USER_ID", "").strip()
-DERPSHRINES_USER_ID: int | None = int(_derp) if _derp else None
 
 # Point values — one source of truth
 BF_MAX = 15

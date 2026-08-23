@@ -1,11 +1,9 @@
 import logging
-import random
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-import leetbot.config as config
 from leetbot.interview.gemini import rate_activity
 
 logger = logging.getLogger(__name__)
@@ -27,18 +25,6 @@ class FunCog(commands.Cog, name="FunCog"):
         embed = discord.Embed(description=response, color=0xFF69B4)
         embed.set_footer(text=f"📋 \"{activity[:100]}\"")
         await interaction.followup.send(embed=embed)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
-        if message.author.id == config.BOT_OWNER_ID:
-            return
-        if random.randint(1, 100) == 1:
-            try:
-                await message.add_reaction("🤓")
-            except discord.HTTPException:
-                pass
 
 
 async def setup(bot: commands.Bot) -> None:
